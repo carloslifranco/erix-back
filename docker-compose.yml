@@ -17,7 +17,7 @@ services:
   api:
     build: .
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-    environment:
+    environment: &api_environment
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-erix}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-erix}
       API_KEY: ${API_KEY:?Set API_KEY in .env}
       UPLOAD_DIR: /data/uploads
@@ -25,6 +25,11 @@ services:
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
       RISK_REVIEW_THRESHOLD: ${RISK_REVIEW_THRESHOLD:-0.35}
       LOW_OCR_CONFIDENCE_THRESHOLD: ${LOW_OCR_CONFIDENCE_THRESHOLD:-0.65}
+      PORTFOLIO_MODEL_PATH: /app/models/portfolio-anomaly.joblib
+      PORTFOLIO_DEMO_MODEL_PATH: /app/models/portfolio-anomaly-demo.joblib
+      PORTFOLIO_REVIEW_THRESHOLD: ${PORTFOLIO_REVIEW_THRESHOLD:-80}
+      PORTFOLIO_MIN_PEERS: ${PORTFOLIO_MIN_PEERS:-5}
+      PORTFOLIO_PATIENT_MONTHLY_THRESHOLD: ${PORTFOLIO_PATIENT_MONTHLY_THRESHOLD:-12}
     volumes:
       - uploaded_documents:/data/uploads
       - ./models:/app/models:ro
@@ -34,6 +39,17 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+
+  trainer:
+    profiles: [tools]
+    build: .
+    command: python -m scripts.train_portfolio
+    environment: *api_environment
+    volumes:
+      - ./models:/app/models
+    depends_on:
+      db:
+        condition: service_healthy
 
   streamlit:
     build: .

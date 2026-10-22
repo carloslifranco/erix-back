@@ -32,6 +32,29 @@ class Claim(Base):
     )
 
     reviews: Mapped[list["Review"]] = relationship(back_populates="claim", cascade="all, delete-orphan")
+    analytics: Mapped["ClaimAnalytics | None"] = relationship(
+        back_populates="claim", cascade="all, delete-orphan", uselist=False,
+    )
+
+
+class ClaimAnalytics(Base):
+    """Optional operator context, in a new table so existing claims need no ALTER."""
+
+    __tablename__ = "claim_analytics"
+
+    claim_id: Mapped[str] = mapped_column(ForeignKey("claims.id"), primary_key=True)
+    provider_ref: Mapped[str] = mapped_column(String(120), index=True)
+    beneficiary_ref: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    specialty: Mapped[str] = mapped_column(String(120))
+    procedure_code: Mapped[str] = mapped_column(String(120))
+    region: Mapped[str] = mapped_column(String(120))
+    quantity: Mapped[int] = mapped_column(default=1)
+    annual_limit: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    document_issue_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_synthetic: Mapped[bool] = mapped_column(default=False)
+    report: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+
+    claim: Mapped[Claim] = relationship(back_populates="analytics")
 
 
 class Review(Base):

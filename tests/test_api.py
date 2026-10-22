@@ -165,3 +165,45 @@ def test_analysis_includes_verification_and_routes_invalid_cpf(monkeypatch) -> N
         assert claim.risk_score == 0.0
         assert claim.extracted_fields["verification"]["needs_review"] is True
         assert "local_verification_needs_review" in claim.risk_signals
+
+
+def test_upload_adds_operator_risk_and_dashboard(monkeypatch, tmp_path) -> None:
+    import io
+    from types import SimpleNamespace
+    from PIL import Image
+    from app.services.risk import RiskAssessment
+    from app.core.config import get_settings
+
+    upload_settings = get_settings().model_copy(update={"upload_dir": str(tmp_path / "uploads")})
+    monkeypatch.setattr("app.api.get_settings", lambda: upload_settings)
+    monkeypatch.setattr("app.api.SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr("app.services.analyzer.get_ocr_service", lambda: SimpleNamespace(
+        extract=lambda _: ("Consulta: 20/10/2026\nValor: R$ 250,00", 0.99),
+    ))
+    monkeypatch.setattr("app.services.analyzer.get_risk_scorer", lambda: SimpleNamespace(
+        assess=lambda **_: RiskAssessment(0.0, [], None),
+    ))
+    image = io.BytesIO()
+    Image.new("RGB", (8, 8)).save(image, format="PNG")
+    with TestClient(app) as client:
+        created = client.post("/v1/claims", json={
+            "provider_name": "Prestador ficticio API", "consultation_date": "2026-10-20",
+            "requested_amount": "500.00", "analytics": {
+                "provider_ref": "API-PROVIDER", "beneficiary_ref": "API-BENEFICIARY",
+                "specialty": "Dermatologia", "procedure_code": "consulta", "region": "Teste API",
+                "quantity": 1, "is_synthetic": True,
+            },
+        })
+        assert created.status_code == 201
+        assert created.json()["analytics"]["report"] is None
+        claim_id = created.json()["id"]
+        upload = client.post(f"/v1/claims/{claim_id}/document", files={"file": ("receipt.png", image.getvalue(), "image/png")})
+        assert upload.status_code == 202
+        claim = client.get(f"/v1/claims/{claim_id}").json()
+        assert claim["status"] == "awaiting_review"
+        assert claim["analytics"]["report"]["priority"] >= 80
+        data = client.get("/v1/risk/dashboard?synthetic=true").json()
+        assert any(row["claim_id"] == claim_id for row in data["claims"])
+        assert client.get("/v1/risk/dashboard?start=2026-10-22&end=2026-01-01").status_code == 422
+        assert client.post(f"/v1/claims/{claim_id}/portfolio-risk").status_code == 200
+        assert client.post("/v1/claims/missing/portfolio-risk").status_code == 404

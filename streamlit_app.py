@@ -4,6 +4,8 @@ from datetime import date
 import requests
 import streamlit as st
 
+from app.ui.portfolio import render_dashboard
+
 API_URL = os.getenv("STREAMLIT_API_URL", "http://localhost:8000").rstrip("/")
 API_KEY = os.getenv("STREAMLIT_API_KEY", "dev-only-change-me")
 HEADERS = {"X-API-Key": API_KEY}
@@ -34,7 +36,10 @@ except requests.RequestException as exc:
     st.error(f"Não foi possível conectar à API ({exc}). Verifique se o serviço está em execução.")
     st.stop()
 
-upload_tab, review_tab = st.tabs(["Enviar solicitação", "Fila de revisão"])
+dashboard_tab, upload_tab, review_tab = st.tabs(["Painel da operadora", "Enviar solicitação", "Fila de revisão"])
+
+with dashboard_tab:
+    render_dashboard(API_URL, HEADERS, TIMEOUT_SECONDS)
 
 with upload_tab:
     with st.form("new_claim"):
@@ -42,21 +47,44 @@ with upload_tab:
         consultation_date = st.date_input("Data da consulta", value=date.today())
         amount = st.number_input("Valor solicitado (R$)", min_value=0.01, step=10.0)
         document = st.file_uploader("Comprovante (JPEG ou PNG)", type=["jpg", "jpeg", "png"])
+        with st.expander("Contexto para análise de risco da operadora", expanded=True):
+            use_analytics = st.checkbox("Incluir no painel de risco", value=True)
+            provider_ref = st.text_input("Referência estável do profissional", placeholder="Ex.: MED-001 ou CRM-SP-12345", max_chars=120)
+            beneficiary_ref = st.text_input("Referência interna do beneficiário (opcional)", placeholder="Ex.: BEN-001; não informe CPF", max_chars=120)
+            specialty = st.text_input("Especialidade", value="Dermatologia", max_chars=120)
+            procedure_code = st.text_input("Código do procedimento", value="consulta", max_chars=120)
+            region = st.text_input("Região / bairro", value="São Paulo / Pinheiros", max_chars=120)
+            quantity = st.number_input("Quantidade de consultas / sessões no documento", min_value=1, max_value=1000, value=1, step=1)
+            annual_limit = st.number_input("Limite anual informado (R$; zero se desconhecido)", min_value=0.0, step=100.0)
+            issue_date = st.date_input("Emissão do documento (opcional)", value=None, max_value=date.today())
+            synthetic = st.checkbox("Dados sintéticos de demonstração", value=True)
+            st.caption("Use referências estáveis para contar recorrência. Especialidade, procedimento e região definem os pares. Esses dados são declarados, sem confirmação cadastral.")
         submitted = st.form_submit_button("Enviar para análise")
 
     if submitted:
         if not provider.strip() or document is None:
             st.error("Informe o prestador e selecione um comprovante.")
+        elif use_analytics and any(len(value.strip()) < 2 for value in (provider_ref, specialty, procedure_code, region)):
+            st.error("Para o painel, informe referência do profissional, especialidade, procedimento e região (mínimo 2 caracteres).")
         else:
             try:
+                payload = {
+                    "provider_name": provider.strip(),
+                    "consultation_date": consultation_date.isoformat(),
+                    "requested_amount": amount,
+                }
+                if use_analytics:
+                    payload["analytics"] = {
+                        "provider_ref": provider_ref.strip(), "beneficiary_ref": beneficiary_ref.strip() or None,
+                        "specialty": specialty.strip(), "procedure_code": procedure_code.strip(), "region": region.strip(),
+                        "quantity": int(quantity), "annual_limit": annual_limit or None,
+                        "document_issue_date": issue_date.isoformat() if issue_date else None,
+                        "is_synthetic": synthetic,
+                    }
                 created = requests.post(
                     f"{API_URL}/v1/claims",
                     headers=HEADERS,
-                    json={
-                        "provider_name": provider.strip(),
-                        "consultation_date": consultation_date.isoformat(),
-                        "requested_amount": amount,
-                    },
+                    json=payload,
                     timeout=TIMEOUT_SECONDS,
                 )
                 created.raise_for_status()
@@ -83,6 +111,12 @@ with review_tab:
             st.write(f"Consulta: {claim['consultation_date']}")
             st.write(f"Sinais para análise: {', '.join(claim['risk_signals']) or 'nenhum sinal automático'}")
             st.write(f"Pontuação de triagem: {claim['risk_score']}")
+            analytics = claim.get("analytics")
+            if analytics and analytics.get("report"):
+                portfolio = analytics["report"]
+                st.write(f"Prioridade da operadora: {portfolio['priority']}/100")
+                for signal in portfolio["signals"]:
+                    st.write(f"• {signal['message']}")
             fields = claim.get("extracted_fields") or {}
             st.write("Dados lidos do comprovante")
             st.json({key: value for key, value in fields.items() if key != "verification"})

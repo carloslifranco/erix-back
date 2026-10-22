@@ -2,6 +2,7 @@ import hashlib
 import io
 import logging
 import uuid
+from datetime import date
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -13,10 +14,11 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.security import require_api_key
 from app.db.session import SessionLocal
-from app.models import Claim, Review
+from app.models import Claim, Review, ClaimAnalytics
 from app.schemas import ClaimCreate, ClaimRead, ReviewCreate, ReviewRead, VerificationCreate
 from app.services.analyzer import analyze_claim
 from app.services.verification import verify_document
+from app.services.portfolio import assess_portfolio, dashboard
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", dependencies=[Depends(require_api_key)])
@@ -40,6 +42,8 @@ def create_claim(payload: ClaimCreate, db: Session = Depends(get_db)) -> Claim:
         requested_amount=payload.requested_amount,
     )
     db.add(claim)
+    if payload.analytics is not None:
+        claim.analytics = ClaimAnalytics(**payload.analytics.model_dump())
     db.commit()
     db.refresh(claim)
     return claim
@@ -182,6 +186,33 @@ def verify_claim(
     if report["needs_review"]:
         claim.status = "awaiting_review"
         claim.risk_signals = list(dict.fromkeys([*claim.risk_signals, "local_verification_needs_review"]))
+    db.commit()
+    return report
+
+
+@router.get("/risk/dashboard")
+def risk_dashboard(
+    synthetic: bool = False,
+    start: date | None = None,
+    end: date | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    if start and end and start > end:
+        raise HTTPException(status_code=422, detail="A data inicial deve ser anterior à final.")
+    return dashboard(db, synthetic, start, end)
+
+
+@router.post("/claims/{claim_id}/portfolio-risk")
+def assess_claim_portfolio(claim_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    claim = db.get(Claim, claim_id)
+    if claim is None:
+        raise HTTPException(status_code=404, detail="Solicitação não encontrada.")
+    if not claim.analytics or claim.status not in {"awaiting_review", "ready_for_human_decision"}:
+        raise HTTPException(status_code=409, detail="Informe contexto analítico e conclua o OCR antes de analisar um pedido pendente.")
+    report = assess_portfolio(claim, db)
+    claim.analytics.report = report
+    if report["review_recommended"] or report["ml"]["status"] == "model_error":
+        claim.status = "awaiting_review"
     db.commit()
     return report
 

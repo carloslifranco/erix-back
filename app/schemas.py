@@ -9,10 +9,29 @@ from typing_extensions import Annotated
 ProviderName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=200)]
 
 
+class AnalyticsContext(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    provider_ref: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=120)]
+    beneficiary_ref: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=120)] | None = None
+    specialty: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=120)]
+    procedure_code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=120)]
+    region: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=120)]
+    quantity: int = Field(default=1, ge=1, le=1000)
+    annual_limit: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    document_issue_date: date | None = None
+    is_synthetic: bool = False
+
+
+class AnalyticsRead(AnalyticsContext):
+    report: dict[str, object] | None = None
+
+
 class ClaimCreate(BaseModel):
     provider_name: ProviderName
     consultation_date: date
     requested_amount: Decimal = Field(gt=0, max_digits=10, decimal_places=2)
+    analytics: AnalyticsContext | None = None
 
 
 class ReviewCreate(BaseModel):
@@ -55,3 +74,4 @@ class ClaimRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     reviews: list[ReviewRead] = Field(default_factory=list)
+    analytics: AnalyticsRead | None = None

@@ -1,5 +1,69 @@
 # Erix Back-end
 
+## Painel de risco para a operadora
+
+Implementação inicial da proposta dos slides 11 e 12 do pitch: priorização de investigação, comparação entre pares e contexto do beneficiário. A aba **Painel da operadora** mostra valor solicitado em revisão prioritária, motivos, profissionais, beneficiários, dispersões de preço/frequência e evidências por pedido. A pontuação de 0 a 100 indica prioridade de revisão, não probabilidade de fraude. Não há execução ou bloqueio Pix; valores sinalizados não são economia auditada.
+
+### Executar e demonstrar
+
+Com o `.env` configurado e Docker Desktop aberto:
+
+```powershell
+docker compose up -d --build api streamlit
+docker compose --profile tools run --rm --build trainer python -m scripts.demo_portfolio
+```
+
+Abra `http://localhost:8501`, vá a **Painel da operadora** e mantenha **Usar dados fictícios de demonstração** ligado. O segundo comando insere **150 pedidos históricos fictícios**, treina o modelo e cria **8 pedidos novos**, incluindo preço elevado, divergência documental e repetição de pedidos no mesmo dia. Não precisa de OCR nem de APIs externas para essa demonstração; os campos lidos são simulados e identificados como sintéticos. O comando usa o banco configurado, adiciona dados a cada execução e não apaga pedidos anteriores. Ele publica apenas o modelo de demonstração, separado do modelo operacional.
+
+Para analisar seus próprios comprovantes de teste, use **Enviar solicitação** e preencha o contexto da operadora: referência estável do profissional, referência interna do beneficiário (opcional), especialidade, código do procedimento, região e quantidade de sessões/consultas. Use a mesma referência para a mesma pessoa e códigos padronizados de procedimento e região. Não use CPF como identificador do beneficiário. O valor por unidade é `requested_amount / quantity`; pacotes de sessões devem informar a quantidade correta.
+
+Novos documentos com contexto recebem o relatório automaticamente após o OCR. Pedidos antigos sem esse contexto continuam disponíveis no fluxo anterior e ficam fora do painel. As tabelas antigas são preservadas; o startup cria uma nova tabela `claim_analytics`. Não há ALTER automático nas tabelas existentes.
+
+### Sinais calculados
+
+| Sinal | Referência atual |
+|---|---|
+| Preço fora dos pares | Mediana dos valores unitários dos 90 dias anteriores, para mesma especialidade, procedimento e região, excluindo o próprio prestador. Exige no mínimo 5 documentos e 3 outros prestadores. Preço ≥1,8x a mediana gera prioridade 85; ≤0,45x gera 65. |
+| Frequência do profissional | Documentos apresentados nos 30 dias anteriores, incluindo o atual; alerta com pelo menos 20 documentos e volume superior a 3x a mediana dos prestadores pares. |
+| Recorrência do beneficiário | Mais de 12 documentos do mesmo procedimento em 30 dias gera prioridade 80; pode ser tratamento recorrente legítimo. |
+| Possível fracionamento | Ao menos 3 pedidos do mesmo beneficiário, profissional, procedimento e data de atendimento gera prioridade 85; exige conferência do contexto. |
+| Valor documental divergente | Diferença superior a R$ 0,02 entre valor solicitado e valor lido com confiança de OCR suficiente gera prioridade 85. |
+| Arquivo repetido | SHA-256 igual a um pedido anterior nos últimos 30 dias gera prioridade 90. |
+| Contexto insuficiente | OCR baixo ou valor ausente é inconclusivo e gera prioridade 50, sem afirmar fraude. |
+
+São regras iniciais ilustrativas, não limites clínicos/contratuais validados. O limiar padrão de revisão é 80. Quando vários motivos aparecem, usa-se a maior prioridade; cada pedido entra uma única vez no total financeiro por motivo principal. Pedidos já decididos saem do valor pendente, mas permanecem no histórico do período.
+
+Frequência mede **documentos apresentados à Erix**, não todas as emissões do profissional. Preços vêm do histórico informado, não de uma tabela oficial de mercado. O gráfico de consumo soma valores solicitados conhecidos no ano do atendimento, dividido pelo limite anual informado: não é saldo contratual, nem total de pagamentos realizados. Recorrência e uso de limite, isoladamente, não comprovam fraude.
+
+### Modelo de Machine Learning
+
+O modelo adicional é um **Isolation Forest** do scikit-learn, independente do classificador documental antigo de `scripts/train_model.py`. Ele combina razão de preço em relação aos pares, disponibilidade dessa referência, frequência de prestador/beneficiário, repetição do par no mesmo dia, diferença de valor documental, duplicidade e confiança de OCR. Não exige rótulos de fraude para aprender padrões atípicos.
+
+Cada vetor usa apenas pedidos recebidos **antes** do pedido analisado. Histórico sintético e operacional não se misturam. O treinamento requer pelo menos **40 vetores com referência de pares suficiente**, com pelo menos 30 no bloco inicial de treino; aproximadamente 20% dos exemplos mais recentes ficam separados para avaliação temporal. Empates de timestamp não são divididos entre treino e avaliação. Isso é um mínimo técnico para a demonstração, não garantia de qualidade estatística.
+
+O relatório de treino mostra taxa de anomalias no período posterior. Sem rótulos confirmados, ela não mede acurácia, precisão ou recall de fraude. A contaminação assumida pelo modelo é 5%, parâmetro de triagem que deve ser validado. Pedidos pontuados como anomalia recebem prioridade de ao menos 80; demais recebem prioridade inferior a 80, conforme percentil relativo ao treino. Essa transformação é uma política explícita de fila, não uma probabilidade calibrada. As regras podem elevar a prioridade independentemente do ML.
+
+O modelo só pontua pedidos recebidos após sua publicação; pedidos anteriores ao treino não recebem métricas de ML sobre o próprio histórico. Não há retreinamento em cada upload nem aprendizado automático com decisões humanas. Para treinar com seu histórico contextualizado de testes:
+
+```powershell
+docker compose --profile tools run --rm trainer python -m scripts.train_portfolio --synthetic
+```
+
+Para o histórico marcado como não sintético, retire `--synthetic`. O acesso ao banco e a escrita dos artefatos são feitos pelo serviço `trainer`; a API só lê os modelos. O próximo pedido carrega o modelo publicado, sem reiniciar a API. Até haver histórico/modelo, o painel mostra as regras e o estado `not_trained`; não inventa pontuação de ML. Erro no artefato gera análise de ML inconclusiva e encaminhamento humano, preservando OCR e regras.
+
+Configurações: `PORTFOLIO_REVIEW_THRESHOLD` (80), `PORTFOLIO_MIN_PEERS` (5 documentos, com mínimo fixo de 3 outros prestadores), `PORTFOLIO_PATIENT_MONTHLY_THRESHOLD` (12). Os arquivos padrão são `models/portfolio-anomaly.joblib` e `models/portfolio-anomaly-demo.joblib`. Não carregue artefatos joblib de fontes desconhecidas.
+
+### API e testes do painel
+
+- `POST /v1/claims` aceita o objeto opcional `analytics` com `provider_ref`, `beneficiary_ref`, `specialty`, `procedure_code`, `region`, `quantity`, `annual_limit`, `document_issue_date` e `is_synthetic`.
+- `GET /v1/claims/{id}` inclui contexto e relatório em `analytics.report`.
+- `GET /v1/risk/dashboard?synthetic=true&start=2026-01-01&end=2026-12-31` agrega relatórios por período de recebimento.
+- `POST /v1/claims/{id}/portfolio-risk` recalcula o relatório de um pedido com contexto, OCR concluído e decisão ainda pendente.
+
+Todas as rotas exigem `X-API-Key`. Testes: `python -m pytest -q`. Há cobertura para datas futuras fora das features, exclusão do próprio prestador dos pares, quantidades de sessões, separação sintético/operacional, treino temporal, falha do modelo, upload até painel e ausência de dupla contagem financeira. A aplicação ainda usa uma chave compartilhada e não oferece isolamento entre operadoras; esta versão continua destinada ao protótipo acadêmico com dados sintéticos.
+
+Referência técnica: [Isolation Forest no scikit-learn](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html).
+
 Proposta de arquitetura para uma plataforma que recebe pedidos de reembolso de consultas, verifica documentos e identifica solicitações que merecem análise adicional. O projeto está em fase inicial; este documento descreve uma arquitetura de referência para um MVP e os requisitos para evoluí-la.
 
 ## Princípio de segurança e produto

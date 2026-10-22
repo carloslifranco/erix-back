@@ -8,6 +8,7 @@ from app.models import Claim
 from app.services.ocr import get_ocr_service
 from app.services.risk import get_risk_scorer, _extract_amount, _extract_date
 from app.services.verification import verify_document
+from app.services.portfolio import assess_portfolio
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,12 @@ def analyze_claim(claim: Claim, db: Session, duplicate_document: bool) -> None:
         if not text and "no_text_extracted" not in claim.risk_signals:
             claim.risk_signals.append("no_text_extracted")
             claim.status = "awaiting_review"
+        if claim.analytics:
+            portfolio = assess_portfolio(claim, db)
+            claim.analytics.report = portfolio
+            if portfolio["review_recommended"] or portfolio["ml"]["status"] == "model_error":
+                claim.status = "awaiting_review"
+                claim.risk_signals = [*claim.risk_signals, "portfolio_review_recommended"]
         db.commit()
     except Exception:
         db.rollback()
