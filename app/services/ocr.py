@@ -14,7 +14,8 @@ class PaddleOCRService:
             from paddleocr import PaddleOCR
         except ImportError as exc:
             raise OCRUnavailableError(
-                "PaddleOCR não está instalado. Instale as dependências do projeto."
+                "Não foi possível carregar o PaddleOCR ou suas dependências nativas. "
+                f"Verifique as dependências Python e do sistema. Causa: {exc}"
             ) from exc
 
         self._engine = PaddleOCR(use_angle_cls=True, lang="pt", show_log=False)

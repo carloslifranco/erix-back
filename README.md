@@ -240,10 +240,10 @@ erix-back/
 
 ### Executar com Docker Compose
 
-1. Instale Docker Desktop com Docker Compose.
+1. Instale Docker Desktop com Docker Compose. 
 2. Na pasta `erix-back`, copie `.env.example` para `.env` e troque `POSTGRES_PASSWORD` e `API_KEY` por valores locais fortes.
 3. Execute `docker compose up --build`.
-4. Abra a interface em `http://localhost:8501`, a documentação da API em `http://localhost:8000/docs` e verifique o health check com a chave: `curl.exe -H "X-API-Key: change-this-development-key" http://localhost:8000/v1/health`.
+4. Abra a interface em `http://localhost:8501`, a documentação da API em `http://localhost:8001/docs` e verifique o health check com a chave: `curl.exe -H "X-API-Key: change-this-development-key" http://localhost:8001/v1/health`.
 5. Para parar, execute `docker compose down`. Os dados persistem nos volumes; `docker compose down -v` apaga os dados e deve ser usado somente se essa exclusão for desejada.
 
 O MVP aceita imagens JPEG e PNG de até 10 MB. O arquivo é validado, salvo em volume privado e enviado ao PaddleOCR em processamento de fundo. O endpoint responde com estado `processing`; a interface deve ser atualizada para consultar o resultado. Uploads não são aceitos como prova de autenticidade. Para PDF, documentos multipágina ou antivírus, será necessário adicionar componentes específicos.

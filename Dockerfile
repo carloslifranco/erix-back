@@ -7,12 +7,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
+    && apt-get install -y --no-install-recommends libgomp1 libxcb1 libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-ocr.txt .
+COPY requirements.txt requirements-ocr.txt ./
 RUN python -m pip install --upgrade pip \
     && python -m pip install -r requirements-ocr.txt
+
+RUN python -c "import cv2; from paddleocr import PaddleOCR"
 
 COPY app ./app
 COPY streamlit_app.py .
