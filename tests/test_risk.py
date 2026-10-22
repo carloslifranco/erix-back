@@ -12,6 +12,11 @@ def test_extract_date_from_receipt() -> None:
     assert _extract_date("Data: 20/10/2026") == date(2026, 10, 20)
 
 
+def test_consultation_date_is_not_patient_birth_date() -> None:
+    assert _extract_date("Nascimento do paciente: 01/02/1990\nData da consulta: 20/10/2026") == date(2026, 10, 20)
+    assert _extract_date("Nascimento do paciente: 01/02/1990") is None
+
+
 def test_mismatch_routes_for_human_review(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.risk.get_settings",

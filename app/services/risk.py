@@ -87,6 +87,11 @@ def _extract_amount(text: str) -> float | None:
 
 
 def _extract_date(text: str) -> date | None:
+    # Patient birth dates must not become the consultation date. Prefer an
+    # explicitly labelled consultation/attendance date over other dates.
+    lines = [line for line in text.splitlines() if "nascimento" not in line.casefold()]
+    labelled = [line for line in lines if re.search(r"(?:consulta|atendimento)\s*:", line, re.IGNORECASE)]
+    text = "\n".join(labelled or lines)
     match = re.search(r"\b(\d{2})[./-](\d{2})[./-](\d{4})\b", text)
     if not match:
         return None

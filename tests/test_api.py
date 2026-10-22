@@ -103,3 +103,65 @@ def test_rejects_invalid_claim_values() -> None:
             },
         )
         assert response.status_code == 422
+
+
+def test_verification_persists_results_without_reference_identity() -> None:
+    with TestClient(app) as client:
+        created = client.post("/v1/claims", json={
+            "provider_name": "Prestador de teste", "consultation_date": "2026-10-20",
+            "requested_amount": "180.00",
+        })
+        claim_id = created.json()["id"]
+        assert client.post(f"/v1/claims/{claim_id}/verification", json={}).status_code == 409
+        with TestingSessionLocal() as db:
+            claim = db.get(Claim, claim_id)
+            claim.status = "ready_for_human_decision"
+            claim.extracted_text = "Paciente: Pessoa Exemplo\nCRM-SP 12345"
+            claim.extracted_fields = {"ocr_confidence": 0.99}
+            db.commit()
+        result = client.post(f"/v1/claims/{claim_id}/verification", json={
+            "patient_name": "Outro Nome", "patient_cpf": "52998224725",
+            "patient_birth_date": "1990-02-01",
+        })
+        assert result.status_code == 200
+        assert result.json()["needs_review"] is True
+        assert "52998224725" not in result.text and "1990-02-01" not in result.text
+        stored = client.get(f"/v1/claims/{claim_id}").json()
+        assert stored["extracted_fields"]["verification"] == result.json()
+        assert stored["status"] == "awaiting_review"
+        assert "local_verification_needs_review" in stored["risk_signals"]
+        assert client.post("/v1/claims/missing/verification", json={}).status_code == 404
+        assert client.post(f"/v1/claims/{claim_id}/verification", json={"patient_cpf": "abc"}).status_code == 422
+        with TestingSessionLocal() as db:
+            claim = db.get(Claim, claim_id)
+            claim.status = "approved"
+            db.commit()
+        assert client.post(f"/v1/claims/{claim_id}/verification", json={}).status_code == 409
+
+
+def test_analysis_includes_verification_and_routes_invalid_cpf(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from app.services.analyzer import analyze_claim
+    from app.services.risk import RiskAssessment
+
+    monkeypatch.setattr("app.services.analyzer.get_ocr_service", lambda: SimpleNamespace(
+        extract=lambda _: ("CPF: 111.111.111-11\nConsulta: 20/10/2026\nR$ 180,00", 0.99),
+    ))
+    monkeypatch.setattr("app.services.analyzer.get_risk_scorer", lambda: SimpleNamespace(
+        assess=lambda **_: RiskAssessment(0.0, [], None),
+    ))
+    with TestingSessionLocal() as db:
+        claim = Claim(
+            id="automatic-verification-test", provider_name="Prestador de teste",
+            consultation_date=date(2026, 10, 20), requested_amount=Decimal("180.00"),
+            status="processing", document_path="test-image.png",
+        )
+        db.add(claim)
+        db.commit()
+        analyze_claim(claim, db, False)
+        db.refresh(claim)
+        assert claim.status == "awaiting_review"
+        assert claim.risk_score == 0.0
+        assert claim.extracted_fields["verification"]["needs_review"] is True
+        assert "local_verification_needs_review" in claim.risk_signals

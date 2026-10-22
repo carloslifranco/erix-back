@@ -287,7 +287,45 @@ Para treinar a baseline, prepare um CSV contendo as colunas `amount_mismatch`, `
 
 O CSV deve ter uso legítimo, rótulos revisados e ser separado por pessoa e tempo para evitar vazamento. Não inclua dados reais de saúde em datasets sem governança e autorização adequadas. O artefato joblib só deve vir de fonte confiável, pois carregar pickle/joblib não confiável pode executar código. Com o arquivo colocado em `models`, a API inclui a avaliação do modelo como mais um sinal de triagem; ela continua sem aprovar ou negar automaticamente.
 
-### Limites conhecidos antes de um piloto
+### Verificação gratuita de consistência e consulta oficial
+
+A análise de novos documentos inclui `extracted_fields.verification`, também exibido na fila de revisão do Streamlit. Sem credenciais e sem chamadas externas, a aplicação verifica dígitos do CPF, identifica referências a CRM/CRP e separa confiança do OCR de autenticidade. CPF com dígitos corretos não comprova existência, situação cadastral ou titularidade. Um CRM/CRP extraído não comprova inscrição ativa ou autoria do recibo. A autenticidade visual permanece `not_verified`: não há detector externo de adulteração integrado.
+
+Na fila de revisão, use **Verificar consistência sem custo** para comparar dados do paciente informados pelo analista com o texto do OCR. O resultado `matches_input` significa apenas coincidência com o dado informado, nunca confirmação em fonte oficial. Os dados de referência fornecidos não são persistidos; o relatório guarda o resultado e CPFs mascarados. O texto original do OCR continua armazenado pelo pipeline existente e pode conter dados pessoais.
+
+Para não confundir paciente e prestador, a extração exige rótulos explícitos, por exemplo:
+
+```text
+Paciente: Pessoa Exemplo
+CPF do paciente: 000.000.000-00
+Nascimento do paciente: 01/02/1990
+CRM-SP 12345
+Data da consulta: 20/10/2026
+Valor: R$ 180,00
+```
+
+Exemplo fictício: o CPF acima é propositalmente inválido. Também são aceitos `Cliente:`, `Beneficiário:`, `CPF do cliente:` e `Data de nascimento do paciente:`; CRM no formato `CRM 12345/SP` e CRP no formato `CRP 06/12345`. A extração é uma baseline: campos não rotulados, ambíguos ou com baixa confiança vão para conferência. Não se presume que o CPF genérico de um documento seja do paciente. Outros conselhos ainda não são extraídos. Dados ausentes não são prova de fraude.
+
+API: `POST /v1/claims/{id}/verification`, autenticada por `X-API-Key`, aceita os campos opcionais `patient_name`, `patient_cpf` e `patient_birth_date` (ISO `YYYY-MM-DD`). Exige OCR concluído e pedido pendente de revisão. O relatório é salvo no JSON existente, sem novas tabelas. Inconsistências encaminham para `awaiting_review`, sem transformar os resultados em uma probabilidade de fraude ou alterar o modelo de quatro features. Novas comparações não removem alertas anteriores nem reabrem decisões encerradas.
+
+Consultas gratuitas para o analista, disponíveis como links no painel:
+
+- [Busca de médicos do CFM](https://portal.cfm.org.br/busca-medicos): conferir nome, CRM, UF e situação.
+- [Cadastro de profissionais do CFP](https://cadastro.cfp.org.br/): conferir nome, CRP, região e situação.
+- [Consulta de situação cadastral do CPF](https://servicos.receita.fazenda.gov.br/Servicos/CPF/ConsultaSituacao/ConsultaPublica.asp): conferir os dados e o resultado disponibilizados pelo serviço oficial.
+- [Consulta de NFS-e](https://www.gov.br/pt-br/servicos/consultar-nota-fiscal-de-servico-eletronica): para documentos fiscais compatíveis com o sistema emissor.
+
+Abrir os links não executa nem comprova uma consulta. Registre fonte, data e resultado na justificativa da revisão. A aplicação não automatiza CAPTCHA, não envia dados pessoais na URL e não transmite documentos a terceiros. [O webservice do CFM exige contratação e chave](https://crmvirtual.cfm.org.br/BR/servico/web-service---listagem-de-medicos); consulta pública em site não implica API aberta para empresas. Nenhuma API gratuita que comprove todos esses elementos foi integrada. Mesmo um cadastro confirmado não comprova que a consulta ocorreu ou que o comprovante foi emitido pelo profissional.
+
+Para aplicar as alterações no Docker:
+
+```powershell
+docker compose up -d --build api streamlit
+```
+
+Novos uploads recebem o relatório automaticamente. Para pedidos antigos com OCR concluído e ainda pendentes, use o botão de comparação no painel. O protótipo continua destinado a dados sintéticos.
+
+### Pendências operacionais
 
 - O processamento `BackgroundTasks` é local à API e não persiste trabalhos após reinício; substitua por fila durável antes de operar em produção.
 - `create_all` cria tabelas para o MVP; adote migrações versionadas (por exemplo, Alembic) para evolução do banco.

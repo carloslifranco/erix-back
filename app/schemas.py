@@ -21,6 +21,14 @@ class ReviewCreate(BaseModel):
     reviewer: str = Field(min_length=2, max_length=120)
 
 
+class VerificationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    patient_name: ProviderName | None = None
+    patient_cpf: str | None = Field(default=None, min_length=11, max_length=14, pattern=r"^[0-9.\-]+$")
+    patient_birth_date: date | None = None
+
+
 class ReviewRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

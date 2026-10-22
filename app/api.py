@@ -14,8 +14,9 @@ from app.core.config import get_settings
 from app.core.security import require_api_key
 from app.db.session import SessionLocal
 from app.models import Claim, Review
-from app.schemas import ClaimCreate, ClaimRead, ReviewCreate, ReviewRead
+from app.schemas import ClaimCreate, ClaimRead, ReviewCreate, ReviewRead, VerificationCreate
 from app.services.analyzer import analyze_claim
+from app.services.verification import verify_document
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", dependencies=[Depends(require_api_key)])
@@ -157,6 +158,32 @@ def create_review(
     db.commit()
     db.refresh(review)
     return review
+
+
+@router.post("/claims/{claim_id}/verification")
+def verify_claim(
+    claim_id: str,
+    payload: VerificationCreate,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    claim = db.get(Claim, claim_id)
+    if claim is None:
+        raise HTTPException(status_code=404, detail="Solicitação não encontrada.")
+    if claim.status not in {"awaiting_review", "ready_for_human_decision"} or not claim.extracted_fields:
+        raise HTTPException(status_code=409, detail="Aguarde o OCR e use uma solicitação pendente de revisão.")
+    report = verify_document(
+        text=claim.extracted_text or "",
+        ocr_confidence=float(claim.extracted_fields.get("ocr_confidence", 0)),
+        **payload.model_dump(),
+    )
+    # Store results, not the supplied CPF/name/birth date. Existing raw OCR is
+    # already persisted by the document pipeline. No registry request is made.
+    claim.extracted_fields = {**claim.extracted_fields, "verification": report}
+    if report["needs_review"]:
+        claim.status = "awaiting_review"
+        claim.risk_signals = list(dict.fromkeys([*claim.risk_signals, "local_verification_needs_review"]))
+    db.commit()
+    return report
 
 
 @router.get("/health")

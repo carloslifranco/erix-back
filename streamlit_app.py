@@ -9,6 +9,16 @@ API_KEY = os.getenv("STREAMLIT_API_KEY", "dev-only-change-me")
 HEADERS = {"X-API-Key": API_KEY}
 TIMEOUT_SECONDS = 20
 
+VERIFICATION_STATUS = {
+    "not_verified": "Não verificado em fonte externa",
+    "reading_only": "Confiança de leitura",
+    "format_valid": "Dígitos válidos; titularidade não confirmada",
+    "needs_review": "Conferir manualmente",
+    "not_found": "Não identificado no OCR",
+    "not_provided": "Referência não informada",
+    "matches_input": "Coincide com o informado; identidade não confirmada",
+}
+
 st.set_page_config(page_title="Erix | Reembolsos", page_icon="🧾", layout="wide")
 st.title("Erix — análise de reembolsos")
 st.warning(
@@ -73,6 +83,61 @@ with review_tab:
             st.write(f"Consulta: {claim['consultation_date']}")
             st.write(f"Sinais para análise: {', '.join(claim['risk_signals']) or 'nenhum sinal automático'}")
             st.write(f"Pontuação de triagem: {claim['risk_score']}")
+            fields = claim.get("extracted_fields") or {}
+            st.write("Dados lidos do comprovante")
+            st.json({key: value for key, value in fields.items() if key != "verification"})
+            report = fields.get("verification")
+            st.caption(
+                "Verificação gratuita de consistência. Não confirma autenticidade da imagem, "
+                "existência do CPF ou situação profissional. Nenhum dado é enviado a serviços externos."
+            )
+            with st.form(f"verification-{claim['id']}"):
+                st.write("Comparar com dados de referência do paciente (opcional)")
+                patient_name = st.text_input("Nome do paciente", max_chars=200)
+                patient_cpf = st.text_input("CPF do paciente", max_chars=14)
+                patient_birth = st.date_input(
+                    "Nascimento do paciente", value=None,
+                    min_value=date(1900, 1, 1), max_value=date.today(),
+                )
+                st.caption(
+                    "A comparação exige rótulos como 'Paciente:', 'CPF do paciente:' e "
+                    "'Nascimento do paciente:' no comprovante. Campos ausentes ficam para conferência."
+                )
+                if st.form_submit_button("Verificar consistência sem custo"):
+                    try:
+                        verified = requests.post(
+                            f"{API_URL}/v1/claims/{claim['id']}/verification",
+                            headers=HEADERS,
+                            json={
+                                "patient_name": patient_name.strip() or None,
+                                "patient_cpf": patient_cpf.strip() or None,
+                                "patient_birth_date": patient_birth.isoformat() if patient_birth else None,
+                            },
+                            timeout=TIMEOUT_SECONDS,
+                        )
+                        verified.raise_for_status()
+                        report = verified.json()
+                        st.success("Comparação concluída. Veja os resultados abaixo.")
+                    except requests.RequestException as exc:
+                        st.error(f"Falha na comparação: {exc}")
+            if report:
+                st.table([
+                    {
+                        "Campo": check["field"],
+                        "Resultado": VERIFICATION_STATUS.get(check["status"], check["status"]),
+                        "Detalhe": check["message"],
+                        "Registro / CPF mascarado": check.get("extracted_value", check.get("masked_value", "")),
+                    }
+                    for check in report["checks"]
+                ])
+                st.write("Consultas oficiais para conferência manual")
+                for label, url in report["official_sources"].items():
+                    st.link_button(f"Consultar {label}", url)
+                st.caption(
+                    "Nos conselhos, confira nome, número, região e situação do registro. "
+                    "Registre a fonte, a data e o resultado da consulta na justificativa da decisão abaixo. "
+                    "Abrir um link não registra uma validação automática."
+                )
             with st.form(f"review-{claim['id']}"):
                 reviewer = st.text_input("Nome do analista", key=f"reviewer-{claim['id']}")
                 rationale = st.text_area("Justificativa da decisão", key=f"rationale-{claim['id']}")
