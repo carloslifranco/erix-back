@@ -1,5 +1,49 @@
 # Erix Back-end
 
+## Análise visual opcional com Gemini (documentos fictícios)
+
+Na aba **Enviar solicitação**, a opção **Analisar indícios visuais com Gemini** envia uma cópia da imagem para a API do Google e salva as observações em `extracted_fields.visual_analysis`. Ela funciona junto ao OCR e às regras locais. É preciso marcar a declaração de que o comprovante é fictício e não contém dados pessoais reais. Se houver contexto analítico, ele também precisa estar marcado como sintético. Sem marcar a opção, nenhum arquivo é enviado ao Gemini.
+
+O modelo procura sinais visuais de possível edição, inconsistências de layout e marcas d'água visíveis, descrevendo o que observou e onde. Isso **não é perícia digital nem confirmação de documento falso ou verdadeiro**. Pode haver falsos positivos e falsos negativos; documentos digitais legítimos podem conter marcas d'água ou fontes distintas. Marca d'água isolada não vira conclusão de adulteração. O modelo não consulta registros oficiais nem detecta de forma garantida imagens geradas por IA, marcas invisíveis ou SynthID.
+
+### Configuração gratuita para teste acadêmico
+
+1. Crie uma chave no [Google AI Studio](https://aistudio.google.com/apikey). Utilize um projeto no nível gratuito, sem faturamento habilitado, e confirme as cotas/modelos disponíveis na sua conta.
+2. No `.env` local, adicione (não compartilhe nem versione a chave):
+
+```dotenv
+VISUAL_ANALYSIS_ENABLED=true
+GEMINI_API_KEY=sua-chave-do-google-ai-studio
+GEMINI_MODEL=gemini-3.1-flash-lite
+VISUAL_ANALYSIS_TIMEOUT_SECONDS=35
+```
+
+3. Recrie os serviços com a configuração:
+
+```powershell
+docker compose up -d --build api streamlit
+```
+
+4. Envie um novo comprovante fictício marcando a análise visual e a declaração de envio ao Google. Atualize a página após o processamento. As observações aparecem na **Fila de revisão**, junto dos dados extraídos. Se o OCR falhar, um relatório visual já obtido permanece salvo e é exibido em **Solicitações recentes**.
+
+O Gemini possui cota gratuita para modelos compatíveis, sujeita a disponibilidade e limites de conta. Este código não garante gratuidade de uma chave ligada a projeto pago: confira o faturamento no provedor. Não há retentativa automática, busca na web, fallback pago ou ferramentas externas no prompt. Ao atingir a cota, a análise visual fica não concluída. A chave permanece no servidor e é enviada no cabeçalho de autenticação, não na URL nem na interface.
+
+**Restrição do serviço gratuito:** os [termos da API Gemini](https://ai.google.dev/gemini-api/terms) orientam a não enviar dados pessoais, confidenciais ou sensíveis aos serviços não pagos; entradas e saídas podem ser usadas para melhorar produtos e vistas por revisores. Por isso, esta integração é destinada a imagens fictícias sem informações reais de pacientes/profissionais. A declaração do usuário não anonimiza nem inspeciona automaticamente a imagem. Um documento real apenas marcado como “sintético” continua contendo dados reais e não deve ser enviado. A imagem é reexportada sem metadados e reduzida para no máximo 2048 pixels de lado; isso não remove dados pessoais visíveis e pode ocultar detalhes finos de edição.
+
+### Resultado e tratamento de falhas
+
+- `completed` com `indications_found`: sinais concretos para conferência, sem comprovar fraude; encaminha para revisão e gera motivo visual com prioridade ilustrativa 85 no painel quando houver contexto.
+- `completed` com `no_obvious_indications`: nenhum sinal evidente apontado, sem confirmar autenticidade ou aprovar automaticamente o pedido.
+- `completed` com `inconclusive`: análise visual inconclusiva; revisão humana.
+- `quota_exceeded`, `timeout`, `authentication_error`, `model_unavailable`, `provider_error`, `invalid_response` ou `inconclusive`: análise não concluída. Não vira “documento válido”; OCR e regras continuam disponíveis.
+- `not_requested`: nenhuma chamada externa. `not_configured`/`synthetic_only`: nenhuma chamada realizada; o upload solicitado pela API normalmente rejeita essas condições antes de gravar o arquivo (503/422).
+
+A resposta é validada por schema e o prompt trata instruções presentes no documento como dados não confiáveis. O relatório mostra sinais e limitações; não produz probabilidade de fraude. A pontuação documental anterior e as features do Isolation Forest permanecem separadas. São resultados de um modelo generativo, que precisam de avaliação com exemplos de teste e conferência humana. Esta implementação foi testada com respostas simuladas; uma chamada real depende da chave e da cota do usuário.
+
+API: `POST /v1/claims/{id}/document`, multipart, aceita `file` e os campos opcionais `request_visual_analysis=true` e `synthetic_document=true`. Todas as rotas continuam exigindo `X-API-Key`. A configuração permanece desabilitada por padrão e não exige instalar SDK adicional.
+
+Fontes: [preços e cota gratuita](https://ai.google.dev/gemini-api/docs/pricing), [entrada de imagens](https://ai.google.dev/gemini-api/docs/image-understanding), [saída estruturada](https://ai.google.dev/gemini-api/docs/structured-output).
+
 ## Painel de risco para a operadora
 
 Implementação inicial da proposta dos slides 11 e 12 do pitch: priorização de investigação, comparação entre pares e contexto do beneficiário. A aba **Painel da operadora** mostra valor solicitado em revisão prioritária, motivos, profissionais, beneficiários, dispersões de preço/frequência e evidências por pedido. A pontuação de 0 a 100 indica prioridade de revisão, não probabilidade de fraude. Não há execução ou bloqueio Pix; valores sinalizados não são economia auditada.
@@ -353,7 +397,7 @@ O CSV deve ter uso legítimo, rótulos revisados e ser separado por pessoa e tem
 
 ### Verificação gratuita de consistência e consulta oficial
 
-A análise de novos documentos inclui `extracted_fields.verification`, também exibido na fila de revisão do Streamlit. Sem credenciais e sem chamadas externas, a aplicação verifica dígitos do CPF, identifica referências a CRM/CRP e separa confiança do OCR de autenticidade. CPF com dígitos corretos não comprova existência, situação cadastral ou titularidade. Um CRM/CRP extraído não comprova inscrição ativa ou autoria do recibo. A autenticidade visual permanece `not_verified`: não há detector externo de adulteração integrado.
+A análise de novos documentos inclui `extracted_fields.verification`, também exibido na fila de revisão do Streamlit. Sem credenciais e sem chamadas externas nesta etapa local, a aplicação verifica dígitos do CPF, identifica referências a CRM/CRP e separa confiança do OCR de autenticidade. CPF com dígitos corretos não comprova existência, situação cadastral ou titularidade. Um CRM/CRP extraído não comprova inscrição ativa ou autoria do recibo. A autenticidade permanece `not_verified` nesta verificação: a análise visual opcional do Gemini é registrada separadamente e também não comprova autenticidade.
 
 Na fila de revisão, use **Verificar consistência sem custo** para comparar dados do paciente informados pelo analista com o texto do OCR. O resultado `matches_input` significa apenas coincidência com o dado informado, nunca confirmação em fonte oficial. Os dados de referência fornecidos não são persistidos; o relatório guarda o resultado e CPFs mascarados. O texto original do OCR continua armazenado pelo pipeline existente e pode conter dados pessoais.
 
@@ -379,7 +423,7 @@ Consultas gratuitas para o analista, disponíveis como links no painel:
 - [Consulta de situação cadastral do CPF](https://servicos.receita.fazenda.gov.br/Servicos/CPF/ConsultaSituacao/ConsultaPublica.asp): conferir os dados e o resultado disponibilizados pelo serviço oficial.
 - [Consulta de NFS-e](https://www.gov.br/pt-br/servicos/consultar-nota-fiscal-de-servico-eletronica): para documentos fiscais compatíveis com o sistema emissor.
 
-Abrir os links não executa nem comprova uma consulta. Registre fonte, data e resultado na justificativa da revisão. A aplicação não automatiza CAPTCHA, não envia dados pessoais na URL e não transmite documentos a terceiros. [O webservice do CFM exige contratação e chave](https://crmvirtual.cfm.org.br/BR/servico/web-service---listagem-de-medicos); consulta pública em site não implica API aberta para empresas. Nenhuma API gratuita que comprove todos esses elementos foi integrada. Mesmo um cadastro confirmado não comprova que a consulta ocorreu ou que o comprovante foi emitido pelo profissional.
+Abrir os links não executa nem comprova uma consulta. Registre fonte, data e resultado na justificativa da revisão. A verificação cadastral local não automatiza CAPTCHA nem transmite dados a terceiros; o envio opcional de imagens fictícias ao Gemini é uma etapa separada, descrita no início deste README. [O webservice do CFM exige contratação e chave](https://crmvirtual.cfm.org.br/BR/servico/web-service---listagem-de-medicos); consulta pública em site não implica API aberta para empresas. Nenhuma API gratuita que confirme todos esses cadastros foi integrada. Mesmo um cadastro confirmado não comprova que a consulta ocorreu ou que o comprovante foi emitido pelo profissional.
 
 Para aplicar as alterações no Docker:
 

@@ -6,7 +6,7 @@ from datetime import date
 from collections.abc import Iterator
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -67,6 +67,8 @@ async def upload_document(
     claim_id: str,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    request_visual_analysis: bool = Form(False),
+    synthetic_document: bool = Form(False),
     db: Session = Depends(get_db),
 ) -> Claim:
     claim = db.get(Claim, claim_id)
@@ -76,6 +78,11 @@ async def upload_document(
         raise HTTPException(status_code=409, detail="Esta solicitação não aceita novo documento neste estado.")
 
     settings = get_settings()
+    if request_visual_analysis:
+        if not synthetic_document or (claim.analytics and not claim.analytics.is_synthetic):
+            raise HTTPException(status_code=422, detail="A análise visual gratuita exige declaração de documento fictício sem dados pessoais reais e contexto sintético, quando informado.")
+        if not settings.visual_analysis_enabled or not settings.gemini_api_key.get_secret_value():
+            raise HTTPException(status_code=503, detail="Análise visual não configurada: habilite VISUAL_ANALYSIS_ENABLED e configure GEMINI_API_KEY no servidor.")
     content = await file.read(settings.max_upload_bytes + 1)
     await file.close()
     if not content:
@@ -110,17 +117,17 @@ async def upload_document(
     claim.status = "processing"
     claim.risk_signals = ["duplicate_document"] if duplicate else []
     db.commit()
-    background_tasks.add_task(_analyze_in_background, claim.id, bool(duplicate))
+    background_tasks.add_task(_analyze_in_background, claim.id, bool(duplicate), request_visual_analysis, synthetic_document)
     db.refresh(claim)
     return claim
 
 
-def _analyze_in_background(claim_id: str, duplicate: bool) -> None:
+def _analyze_in_background(claim_id: str, duplicate: bool, request_visual_analysis: bool = False, synthetic_document: bool = False) -> None:
     db = SessionLocal()
     try:
         claim = db.get(Claim, claim_id)
         if claim is not None:
-            analyze_claim(claim, db, duplicate)
+            analyze_claim(claim, db, duplicate, visual_analysis_requested=request_visual_analysis, synthetic_document=synthetic_document)
     except Exception:
         db.rollback()
         logger.exception("Erro não tratado no processamento da solicitação %s", claim_id)

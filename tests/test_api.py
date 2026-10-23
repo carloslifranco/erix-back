@@ -207,3 +207,66 @@ def test_upload_adds_operator_risk_and_dashboard(monkeypatch, tmp_path) -> None:
         assert client.get("/v1/risk/dashboard?start=2026-10-22&end=2026-01-01").status_code == 422
         assert client.post(f"/v1/claims/{claim_id}/portfolio-risk").status_code == 200
         assert client.post("/v1/claims/missing/portfolio-risk").status_code == 404
+
+
+def test_visual_upload_requires_synthetic_opt_in_and_preserves_ocr(monkeypatch, tmp_path) -> None:
+    import io
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from PIL import Image
+    from pydantic import SecretStr
+    from app.core.config import get_settings
+    from app.services.risk import RiskAssessment
+
+    settings = get_settings().model_copy(update={
+        "upload_dir": str(tmp_path), "visual_analysis_enabled": False, "gemini_api_key": SecretStr("test-key"),
+    })
+    monkeypatch.setattr("app.api.get_settings", lambda: settings)
+    monkeypatch.setattr("app.api.SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr("app.services.analyzer.get_ocr_service", lambda: SimpleNamespace(
+        extract=lambda _: ("Consulta: 20/10/2026\nValor: R$ 180,00", 0.99),
+    ))
+    monkeypatch.setattr("app.services.analyzer.get_risk_scorer", lambda: SimpleNamespace(
+        assess=lambda **_: RiskAssessment(0.0, [], None),
+    ))
+    visual = Mock(return_value={"provider": "gemini", "status": "completed", "verdict": "indications_found", "review_recommended": True})
+    monkeypatch.setattr("app.services.analyzer.analyze_visual", visual)
+    image = io.BytesIO()
+    Image.new("RGB", (8, 8)).save(image, format="PNG")
+    with TestClient(app) as client:
+        created = client.post("/v1/claims", json={"provider_name": "Prestador ficticio", "consultation_date": "2026-10-20", "requested_amount": "180.00"})
+        claim_id = created.json()["id"]
+        url = f"/v1/claims/{claim_id}/document"
+        files = {"file": ("receipt.png", image.getvalue(), "image/png")}
+        assert client.post(url, files=files, data={"request_visual_analysis": "true"}).status_code == 422
+        assert client.post(url, files=files, data={"request_visual_analysis": "true", "synthetic_document": "true"}).status_code == 503
+        visual.assert_not_called()
+        settings.visual_analysis_enabled = True
+        response = client.post(url, files=files, data={"request_visual_analysis": "true", "synthetic_document": "true"})
+        assert response.status_code == 202
+        visual.assert_called_once()
+        assert visual.call_args.kwargs == {"requested": True, "synthetic_document": True}
+        stored = client.get(f"/v1/claims/{claim_id}").json()
+        assert stored["status"] == "awaiting_review"
+        assert stored["risk_score"] == 0.0
+        assert stored["extracted_fields"]["amount"] == 180.0
+        assert stored["extracted_fields"]["visual_analysis"]["verdict"] == "indications_found"
+
+
+def test_visual_report_survives_ocr_failure(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from app.services.analyzer import analyze_claim
+
+    result = {"status": "completed", "verdict": "inconclusive", "review_recommended": True}
+    monkeypatch.setattr("app.services.analyzer.analyze_visual", Mock(return_value=result))
+    monkeypatch.setattr("app.services.analyzer.get_ocr_service", lambda: SimpleNamespace(extract=Mock(side_effect=RuntimeError("OCR unavailable"))))
+    with TestingSessionLocal() as db:
+        claim = Claim(id="visual-ocr-failure", provider_name="Prestador ficticio", consultation_date=date(2026, 10, 20),
+                      requested_amount=Decimal("180"), status="processing", document_path="test-image.png")
+        db.add(claim)
+        db.commit()
+        analyze_claim(claim, db, False, visual_analysis_requested=True, synthetic_document=True)
+        db.refresh(claim)
+        assert claim.status == "processing_error"
+        assert claim.extracted_fields["visual_analysis"] == result

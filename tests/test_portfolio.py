@@ -137,6 +137,17 @@ def test_training_without_enough_history_does_not_publish_a_model(settings, tmp_
     assert not path.exists()
 
 
+def test_visual_findings_enter_triage_without_changing_ml_features(settings, db):
+    claim = record(datetime.now(timezone.utc))
+    claim.extracted_fields["visual_analysis"] = {"status": "completed", "verdict": "indications_found", "review_recommended": True}
+    db.add(claim)
+    db.commit()
+    report = assess_portfolio(claim, db)
+    assert report["review_recommended"] is True
+    assert any(signal["code"] == "visual_indications" for signal in report["signals"])
+    assert "visual_indications" not in report["features"]
+
+
 def test_dashboard_does_not_double_count_money_or_mix_synthetic_and_operational(settings, db):
     now = datetime.now(timezone.utc)
     claims = [record(now - timedelta(hours=2), amount=400), record(now - timedelta(hours=1), amount=300), record(now, amount=900, synthetic=False)]

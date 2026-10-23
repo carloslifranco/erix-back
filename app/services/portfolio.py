@@ -175,6 +175,12 @@ def assess_portfolio(claim: Claim, db: Session) -> dict[str, object]:
         add("duplicate_document", "Documento repetido", 90, "Mesmo arquivo apresentado em outro pedido nos últimos 30 dias.")
     if features["ocr_confidence"] < get_settings().low_ocr_confidence_threshold or not evidence["amount_comparison_available"]:
         add("document_quality", "Dados insuficientes", 50, "Valor ausente ou OCR insuficiente; comparação documental inconclusiva.")
+    visual = (claim.extracted_fields or {}).get("visual_analysis") or {}
+    if visual.get("status") == "completed" and visual.get("verdict") == "indications_found":
+        add("visual_indications", "Sinais visuais para conferência", 85,
+            "Modelo visual apontou possível edição ou inconsistência de layout. Não comprova adulteração; veja as observações do Gemini na revisão.")
+    elif visual.get("review_recommended"):
+        add("visual_inconclusive", "Dados insuficientes", 50, "Análise visual solicitada ficou inconclusiva ou indisponível. Conferir manualmente.")
     ml = assess_ml(features, claim)
     if ml.get("anomalous"):
         add("ml_anomaly", "Padrão histórico atípico", int(ml["priority"]), "Combinação de frequência, preço e consistência atípica para o modelo histórico.")

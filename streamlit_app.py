@@ -5,6 +5,7 @@ import requests
 import streamlit as st
 
 from app.ui.portfolio import render_dashboard
+from app.ui.visual_analysis import render_visual_analysis
 
 API_URL = os.getenv("STREAMLIT_API_URL", "http://localhost:8000").rstrip("/")
 API_KEY = os.getenv("STREAMLIT_API_KEY", "dev-only-change-me")
@@ -47,6 +48,16 @@ with upload_tab:
         consultation_date = st.date_input("Data da consulta", value=date.today())
         amount = st.number_input("Valor solicitado (R$)", min_value=0.01, step=10.0)
         document = st.file_uploader("Comprovante (JPEG ou PNG)", type=["jpg", "jpeg", "png"])
+        visual_requested = st.checkbox("Analisar indícios visuais com Gemini (opcional)", value=False)
+        visual_synthetic = st.checkbox(
+            "Confirmo que a imagem é fictícia, sem dados pessoais reais, e autorizo seu envio ao Google para análise",
+            value=False,
+        )
+        st.caption(
+            "A cota gratuita do Gemini depende da conta e dos limites do Google. "
+            "O serviço gratuito pode usar os arquivos para melhorar seus produtos; use somente documentos fictícios. "
+            "A análise aponta sinais visuais e não comprova falsidade. Requer configuração da chave no servidor."
+        )
         with st.expander("Contexto para análise de risco da operadora", expanded=True):
             use_analytics = st.checkbox("Incluir no painel de risco", value=True)
             provider_ref = st.text_input("Referência estável do profissional", placeholder="Ex.: MED-001 ou CRM-SP-12345", max_chars=120)
@@ -64,6 +75,8 @@ with upload_tab:
     if submitted:
         if not provider.strip() or document is None:
             st.error("Informe o prestador e selecione um comprovante.")
+        elif visual_requested and (not visual_synthetic or (use_analytics and not synthetic)):
+            st.error("Para usar Gemini gratuitamente, confirme que a imagem é fictícia e marque o contexto como sintético, quando incluído.")
         elif use_analytics and any(len(value.strip()) < 2 for value in (provider_ref, specialty, procedure_code, region)):
             st.error("Para o painel, informe referência do profissional, especialidade, procedimento e região (mínimo 2 caracteres).")
         else:
@@ -93,12 +106,19 @@ with upload_tab:
                     f"{API_URL}/v1/claims/{claim['id']}/document",
                     headers=HEADERS,
                     files={"file": (document.name, document.getvalue(), document.type)},
+                    data={"request_visual_analysis": str(visual_requested).lower(), "synthetic_document": str(visual_synthetic).lower()},
                     timeout=TIMEOUT_SECONDS,
                 )
                 uploaded.raise_for_status()
                 st.success(f"Solicitação {claim['id']} enviada. Atualize a página para acompanhar o processamento.")
             except requests.RequestException as exc:
-                st.error(f"Falha ao enviar solicitação: {exc}")
+                detail = str(exc)
+                if exc.response is not None:
+                    try:
+                        detail = exc.response.json().get("detail", detail)
+                    except ValueError:
+                        pass
+                st.error(f"Falha ao enviar solicitação: {detail}")
 
 with review_tab:
     reviewable = [claim for claim in claims if claim["status"] in {"awaiting_review", "ready_for_human_decision"}]
@@ -118,12 +138,14 @@ with review_tab:
                 for signal in portfolio["signals"]:
                     st.write(f"• {signal['message']}")
             fields = claim.get("extracted_fields") or {}
+            render_visual_analysis(fields.get("visual_analysis"))
             st.write("Dados lidos do comprovante")
-            st.json({key: value for key, value in fields.items() if key != "verification"})
+            st.json({key: value for key, value in fields.items() if key not in {"verification", "visual_analysis"}})
             report = fields.get("verification")
             st.caption(
                 "Verificação gratuita de consistência. Não confirma autenticidade da imagem, "
-                "existência do CPF ou situação profissional. Nenhum dado é enviado a serviços externos."
+                "existência do CPF ou situação profissional. Esta etapa é local; "
+                "o envio opcional ao Gemini é informado separadamente na análise visual."
             )
             with st.form(f"verification-{claim['id']}"):
                 st.write("Comparar com dados de referência do paciente (opcional)")
@@ -199,6 +221,10 @@ with review_tab:
                         st.error(f"Falha ao registrar decisão: {exc}")
 
 with st.expander("Solicitações recentes"):
+    for claim in claims:
+        if claim["status"] == "processing_error" and (claim.get("extracted_fields") or {}).get("visual_analysis"):
+            st.write(f"Pedido {claim['id']}: o OCR falhou; a análise visual está disponível abaixo.")
+            render_visual_analysis(claim["extracted_fields"]["visual_analysis"])
     st.dataframe(
         [
             {

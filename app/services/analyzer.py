@@ -9,14 +9,19 @@ from app.services.ocr import get_ocr_service
 from app.services.risk import get_risk_scorer, _extract_amount, _extract_date
 from app.services.verification import verify_document
 from app.services.portfolio import assess_portfolio
+from app.services.visual_analysis import analyze_visual
 
 logger = logging.getLogger(__name__)
 
 
-def analyze_claim(claim: Claim, db: Session, duplicate_document: bool) -> None:
+def analyze_claim(
+    claim: Claim, db: Session, duplicate_document: bool,
+    *, visual_analysis_requested: bool = False, synthetic_document: bool = False,
+) -> None:
     if not claim.document_path:
         raise ValueError("Solicitação sem documento armazenado.")
 
+    visual = analyze_visual(Path(claim.document_path), requested=visual_analysis_requested, synthetic_document=synthetic_document)
     try:
         text, confidence = get_ocr_service().extract(Path(claim.document_path))
         assessment = get_risk_scorer().assess(
@@ -35,6 +40,8 @@ def analyze_claim(claim: Claim, db: Session, duplicate_document: bool) -> None:
             "ocr_confidence": round(confidence, 4),
             "verification": verification,
         }
+        if visual_analysis_requested:
+            claim.extracted_fields["visual_analysis"] = visual
         claim.risk_score = assessment.score
         claim.risk_signals = assessment.signals
         claim.model_version = assessment.model_version
@@ -45,6 +52,9 @@ def analyze_claim(claim: Claim, db: Session, duplicate_document: bool) -> None:
         )
         if verification["needs_review"]:
             claim.risk_signals = [*claim.risk_signals, "local_verification_needs_review"]
+        if visual_analysis_requested and visual["review_recommended"]:
+            claim.status = "awaiting_review"
+            claim.risk_signals = [*claim.risk_signals, "visual_analysis_needs_review"]
         if not text and "no_text_extracted" not in claim.risk_signals:
             claim.risk_signals.append("no_text_extracted")
             claim.status = "awaiting_review"
@@ -58,6 +68,8 @@ def analyze_claim(claim: Claim, db: Session, duplicate_document: bool) -> None:
     except Exception:
         db.rollback()
         claim.status = "processing_error"
+        if visual_analysis_requested:
+            claim.extracted_fields = {**(claim.extracted_fields or {}), "visual_analysis": visual}
         db.add(claim)
         db.commit()
         logger.exception("Falha ao analisar solicitação %s", claim.id)
